@@ -2,13 +2,10 @@ package radix
 
 import (
 	"errors"
+	"net/http"
 	"strings"
-
-	"github.com/valyala/bytebufferpool"
-	"github.com/valyala/fasthttp"
 )
 
-// New returns an empty routes storage
 func New() *Tree {
 	return &Tree{
 		root: &node{
@@ -20,7 +17,7 @@ func New() *Tree {
 // Add adds a node with the given handle to the path.
 //
 // WARNING: Not concurrency-safe!
-func (t *Tree) Add(path string, handler fasthttp.RequestHandler) {
+func (t *Tree) Add(path string, handler http.Handler) {
 	if !strings.HasPrefix(path, "/") {
 		panicf("path must begin with '/' in path '%s'", path)
 	} else if handler == nil {
@@ -66,11 +63,12 @@ func (t *Tree) Add(path string, handler fasthttp.RequestHandler) {
 }
 
 // Get returns the handle registered with the given path (key). The values of
-// param/wildcard are saved as ctx.UserValue.
+// param/wildcard are saved as PathValue.
+//
 // If no handle can be found, a TSR (trailing slash redirect) recommendation is
-// made if a handle exists with an extra (without the) trailing slash for the
+// made if a handle exists with (or without) an extra trailing slash for the
 // given path.
-func (t *Tree) Get(path string, ctx *fasthttp.RequestCtx) (fasthttp.RequestHandler, bool) {
+func (t *Tree) Get(path string, req *http.Request) (http.Handler, bool) {
 	if len(path) > len(t.root.path) {
 		if path[:len(t.root.path)] != t.root.path {
 			return nil, false
@@ -78,8 +76,7 @@ func (t *Tree) Get(path string, ctx *fasthttp.RequestCtx) (fasthttp.RequestHandl
 
 		path = path[len(t.root.path):]
 
-		return t.root.getFromChild(path, ctx)
-
+		return t.root.getFromChild(path, req)
 	} else if path == t.root.path {
 		switch {
 		case t.root.tsr:
@@ -87,8 +84,8 @@ func (t *Tree) Get(path string, ctx *fasthttp.RequestCtx) (fasthttp.RequestHandl
 		case t.root.handler != nil:
 			return t.root.handler, false
 		case t.root.wildcard != nil:
-			if ctx != nil {
-				ctx.SetUserValue(t.root.wildcard.paramKey, "")
+			if req != nil {
+				req.SetPathValue(t.root.wildcard.paramKey, "")
 			}
 
 			return t.root.wildcard.handler, false
@@ -100,15 +97,15 @@ func (t *Tree) Get(path string, ctx *fasthttp.RequestCtx) (fasthttp.RequestHandl
 
 // FindCaseInsensitivePath makes a case-insensitive lookup of the given path
 // and tries to find a handler.
+//
 // It can optionally also fix trailing slashes.
+//
 // It returns the case-corrected path and a bool indicating whether the lookup
 // was successful.
-func (t *Tree) FindCaseInsensitivePath(path string, fixTrailingSlash bool, buf *bytebufferpool.ByteBuffer) bool {
-	found, tsr := t.root.find(path, buf)
+func (t *Tree) FindCaseInsensitivePath(path string, fixTrailingSlash bool, caseCorrected *[]byte) bool {
+	found, tsr := t.root.find(path, caseCorrected)
 
 	if !found || (tsr && !fixTrailingSlash) {
-		buf.Reset()
-
 		return false
 	}
 

@@ -5,23 +5,10 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/valyala/bytebufferpool"
 )
 
-func panicf(s string, args ...interface{}) {
+func panicf(s string, args ...any) {
 	panic(fmt.Sprintf(s, args...))
-}
-
-func min(a, b int) int {
-	if a <= b {
-		return a
-	}
-	return b
-}
-
-func bufferRemoveString(buf *bytebufferpool.ByteBuffer, s string) {
-	buf.B = buf.B[:len(buf.B)-len(s)]
 }
 
 // func isIndexEqual(a, b string) bool {

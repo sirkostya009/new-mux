@@ -1,29 +1,29 @@
 package radix
 
 import (
+	"crypto/rand"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
-
-	"github.com/savsgio/gotils/bytes"
-	"github.com/valyala/bytebufferpool"
-	"github.com/valyala/fasthttp"
 )
 
-func generateHandler() fasthttp.RequestHandler {
-	hex := bytes.Rand(make([]byte, 10))
+func generateHandler() http.Handler {
+	hex := make([]byte, 10)
+	rand.Read(hex)
 
-	return func(ctx *fasthttp.RequestCtx) {
-		ctx.Write(hex)
-	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(hex)
+	})
 }
 
 func testHandlerAndParams(
-	t *testing.T, tree *Tree, reqPath string, handler fasthttp.RequestHandler, wantTSR bool, params map[string]interface{},
+	t *testing.T, tree *Tree, reqPath string, handler http.Handler, wantTSR bool, params map[string]any,
 ) {
-	for _, ctx := range []*fasthttp.RequestCtx{new(fasthttp.RequestCtx), nil} {
+	for _, req := range []*http.Request{httptest.NewRequest("GET", reqPath, nil), nil} {
 
-		h, tsr := tree.Get(reqPath, ctx)
+		h, tsr := tree.Get(reqPath, req)
 		if reflect.ValueOf(handler).Pointer() != reflect.ValueOf(h).Pointer() {
 			t.Errorf("Path '%s' handler == %p, want %p", reqPath, h, handler)
 		}
@@ -32,18 +32,11 @@ func testHandlerAndParams(
 			t.Errorf("Path '%s' tsr == %v, want %v", reqPath, tsr, wantTSR)
 		}
 
-		if ctx != nil {
-			resultParams := make(map[string]interface{})
-			if params == nil {
-				params = make(map[string]interface{})
-			}
-
-			ctx.VisitUserValues(func(key []byte, value interface{}) {
-				resultParams[string(key)] = value
-			})
-
-			if !reflect.DeepEqual(resultParams, params) {
-				t.Errorf("Path '%s' User values == %v, want %v", reqPath, resultParams, params)
+		if req != nil {
+			for k, v := range params {
+				if req.PathValue(k) != v {
+					t.Errorf("Route %s - path value == %s:%v, want %v", reqPath, k, req.PathValue(k), v)
+				}
 			}
 		}
 	}
@@ -53,12 +46,12 @@ func Test_Tree(t *testing.T) {
 	type args struct {
 		path    string
 		reqPath string
-		handler fasthttp.RequestHandler
+		handler http.Handler
 	}
 
 	type want struct {
 		tsr    bool
-		params map[string]interface{}
+		params map[string]any
 	}
 
 	tests := []struct {
@@ -72,7 +65,7 @@ func Test_Tree(t *testing.T) {
 				handler: generateHandler(),
 			},
 			want: want{
-				params: map[string]interface{}{
+				params: map[string]any{
 					"name": "atreugo",
 				},
 			},
@@ -115,7 +108,7 @@ func Test_Tree(t *testing.T) {
 				handler: generateHandler(),
 			},
 			want: want{
-				params: map[string]interface{}{
+				params: map[string]any{
 					"name": "atreugo",
 				},
 			},
@@ -137,7 +130,7 @@ func Test_Tree(t *testing.T) {
 				handler: generateHandler(),
 			},
 			want: want{
-				params: map[string]interface{}{
+				params: map[string]any{
 					"status": "active",
 				},
 			},
@@ -149,7 +142,7 @@ func Test_Tree(t *testing.T) {
 				handler: generateHandler(),
 			},
 			want: want{
-				params: map[string]interface{}{
+				params: map[string]any{
 					"filepath": "assets/js/main.js",
 				},
 			},
@@ -197,7 +190,7 @@ func Test_Tree(t *testing.T) {
 
 	tree.Add("/{filepath:*}", filepathHandler)
 
-	testHandlerAndParams(t, tree, "/js/main.js", filepathHandler, false, map[string]interface{}{
+	testHandlerAndParams(t, tree, "/js/main.js", filepathHandler, false, map[string]any{
 		"filepath": "js/main.js",
 	})
 }
@@ -232,19 +225,19 @@ func Test_AddWithParam(t *testing.T) {
 	tree.Add("/prefix{name:[a-z]+}/data", handler)
 	tree.Add("/api/{file}.json", handler)
 
-	testHandlerAndParams(t, tree, "/api/prefixV1_atreugo_sufix/files", handler, false, map[string]interface{}{
+	testHandlerAndParams(t, tree, "/api/prefixV1_atreugo_sufix/files", handler, false, map[string]any{
 		"version": "V1", "name": "atreugo",
 	})
-	testHandlerAndParams(t, tree, "/api/prefixV1_atreugo_sufix/data", handler, false, map[string]interface{}{
+	testHandlerAndParams(t, tree, "/api/prefixV1_atreugo_sufix/data", handler, false, map[string]any{
 		"version": "V1", "name": "atreugo",
 	})
-	testHandlerAndParams(t, tree, "/prefixatreugosuffix/data", handler, false, map[string]interface{}{
+	testHandlerAndParams(t, tree, "/prefixatreugosuffix/data", handler, false, map[string]any{
 		"name": "atreugo",
 	})
-	testHandlerAndParams(t, tree, "/prefixatreugo/data", handler, false, map[string]interface{}{
+	testHandlerAndParams(t, tree, "/prefixatreugo/data", handler, false, map[string]any{
 		"name": "atreugo",
 	})
-	testHandlerAndParams(t, tree, "/api/name.json", handler, false, map[string]interface{}{
+	testHandlerAndParams(t, tree, "/api/name.json", handler, false, map[string]any{
 		"file": "name",
 	})
 
@@ -258,12 +251,12 @@ func Test_TreeRootWildcard(t *testing.T) {
 	tree := New()
 	tree.Add("/{filepath:*}", handler)
 
-	testHandlerAndParams(t, tree, "/", handler, false, map[string]interface{}{
+	testHandlerAndParams(t, tree, "/", handler, false, map[string]any{
 		"filepath": "",
 	})
 
 	tree.Add("/hello/{a}/{b}/{c}", handler)
-	testHandlerAndParams(t, tree, "/hello/a", handler, false, map[string]interface{}{
+	testHandlerAndParams(t, tree, "/hello/a", handler, false, map[string]any{
 		"filepath": "hello/a",
 	})
 }
@@ -323,7 +316,7 @@ func Test_TreeMutable(t *testing.T) {
 }
 
 func Benchmark_Get(b *testing.B) {
-	handler := func(ctx *fasthttp.RequestCtx) {}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 
 	tree := New()
 
@@ -342,57 +335,57 @@ func Benchmark_Get(b *testing.B) {
 	tree.Add("/queries", handler)
 	tree.Add("/update", handler)
 
-	ctx := new(fasthttp.RequestCtx)
+	req := httptest.NewRequest("METHOD", "", nil)
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		tree.Get("/update", ctx)
+		tree.Get("/update", req)
 	}
 }
 
 func Benchmark_GetWithRegex(b *testing.B) {
-	handler := func(ctx *fasthttp.RequestCtx) {}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 
 	tree := New()
-	ctx := new(fasthttp.RequestCtx)
+	req := httptest.NewRequest("METHOD", "/", nil)
 
 	tree.Add("/api/{version:v[0-9]}/data", handler)
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		tree.Get("/api/v1/data", ctx)
+		tree.Get("/api/v1/data", req)
 	}
 }
 
 func Benchmark_GetWithParams(b *testing.B) {
-	handler := func(ctx *fasthttp.RequestCtx) {}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 
 	tree := New()
-	ctx := new(fasthttp.RequestCtx)
+	req := httptest.NewRequest("METHOD", "/", nil)
 
 	tree.Add("/api/{version}/data", handler)
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		tree.Get("/api/v1/data", ctx)
+		tree.Get("/api/v1/data", req)
 	}
 }
 
 func Benchmark_FindCaseInsensitivePath(b *testing.B) {
-	handler := func(ctx *fasthttp.RequestCtx) {}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 
 	tree := New()
-	buf := bytebufferpool.Get()
+	buf := []byte{}
 
 	tree.Add("/endpoint", handler)
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		tree.FindCaseInsensitivePath("/ENdpOiNT", false, buf)
-		buf.Reset()
+		tree.FindCaseInsensitivePath("/ENdpOiNT", false, &buf)
+		buf = buf[:0]
 	}
 }

@@ -2,19 +2,17 @@ package radix
 
 import (
 	"fmt"
-	"reflect"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/valyala/bytebufferpool"
-	"github.com/valyala/fasthttp"
 )
 
 type testRequests []struct {
 	path       string
 	nilHandler bool
 	route      string
-	ps         map[string]interface{}
+	ps         map[string]any
 }
 
 type testRoute struct {
@@ -25,13 +23,13 @@ type testRoute struct {
 // Used as a workaround since we can't compare functions or their addresses
 var fakeHandlerValue string
 
-func fakeHandler(val string) fasthttp.RequestHandler {
-	return func(ctx *fasthttp.RequestCtx) {
+func fakeHandler(val string) http.HandlerFunc {
+	return func(http.ResponseWriter, *http.Request) {
 		fakeHandlerValue = val
 	}
 }
 
-func catchPanic(testFunc func()) (recv interface{}) {
+func catchPanic(testFunc func()) (recv any) {
 	defer func() {
 		recv = recover()
 	}()
@@ -40,20 +38,11 @@ func catchPanic(testFunc func()) (recv interface{}) {
 	return
 }
 
-func acquireRequestCtx(path string) *fasthttp.RequestCtx {
-	ctx := new(fasthttp.RequestCtx)
-	req := new(fasthttp.Request)
-
-	req.SetRequestURI(path)
-	ctx.Init(req, nil, nil)
-
-	return ctx
-}
-
 func checkRequests(t *testing.T, tree *Tree, requests testRequests) {
 	for _, request := range requests {
-		ctx := acquireRequestCtx(request.path)
-		handler, _ := tree.Get(request.path, ctx)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("METHOD", request.path, nil)
+		handler, _ := tree.Get(request.path, req)
 
 		if handler == nil {
 			if !request.nilHandler {
@@ -62,23 +51,16 @@ func checkRequests(t *testing.T, tree *Tree, requests testRequests) {
 		} else if request.nilHandler {
 			t.Errorf("handle mismatch for route '%s': Expected nil handle", request.path)
 		} else {
-			handler(ctx)
+			handler.ServeHTTP(rec, req)
 			if fakeHandlerValue != request.route {
 				t.Errorf("handle mismatch for route '%s': Wrong handle (%s != %s)", request.path, fakeHandlerValue, request.route)
 			}
 		}
 
-		params := make(map[string]interface{})
-		if request.ps == nil {
-			request.ps = make(map[string]interface{})
-		}
-
-		ctx.VisitUserValues(func(key []byte, value interface{}) {
-			params[string(key)] = value
-		})
-
-		if !reflect.DeepEqual(params, request.ps) {
-			t.Errorf("Route %s - User values == %v, want %v", request.path, params, request.ps)
+		for k, v := range request.ps {
+			if req.PathValue(k) != v {
+				t.Errorf("Route %s - path value == %s:%v, want %v", request.path, k, req.PathValue(k), v)
+			}
 		}
 	}
 }
@@ -141,11 +123,11 @@ func TestTreeAddAndGet(t *testing.T) {
 		{"/β", false, "/β", nil},
 		{"/hello/test", false, "/hello/test", nil},
 		{"/hello/tooth", false, "/hello/tooth", nil},
-		{"/hello/testastretta", false, "/hello/{name}", map[string]interface{}{"name": "testastretta"}},
-		{"/hello/tes", false, "/hello/{name}", map[string]interface{}{"name": "tes"}},
+		{"/hello/testastretta", false, "/hello/{name}", map[string]any{"name": "testastretta"}},
+		{"/hello/tes", false, "/hello/{name}", map[string]any{"name": "tes"}},
 		{"/hello/test/bye", true, "", nil},
-		{"/regex/more_alt/hello", false, "/regex/{path:*}", map[string]interface{}{"path": "more_alt/hello"}},
-		{"/regex/small_alt/hello", false, "/regex/{c1:big_alt|alt|small_alt}/{rest:*}", map[string]interface{}{"c1": "small_alt", "rest": "hello"}},
+		{"/regex/more_alt/hello", false, "/regex/{path:*}", map[string]any{"path": "more_alt/hello"}},
+		{"/regex/small_alt/hello", false, "/regex/{c1:big_alt|alt|small_alt}/{rest:*}", map[string]any{"c1": "small_alt", "rest": "hello"}},
 	})
 }
 
@@ -176,19 +158,19 @@ func TestTreeWildcard(t *testing.T) {
 
 	checkRequests(t, tree, testRequests{
 		{"/", false, "/", nil},
-		{"/cmd/test/", false, "/cmd/{tool}/", map[string]interface{}{"tool": "test"}},
+		{"/cmd/test/", false, "/cmd/{tool}/", map[string]any{"tool": "test"}},
 		{"/cmd/test", true, "", nil},
-		{"/cmd/test/3", false, "/cmd/{tool}/{sub}", map[string]interface{}{"tool": "test", "sub": "3"}},
-		{"/src/", false, "/src/{filepath:*}", map[string]interface{}{"filepath": ""}},
-		{"/src/some/file.png", false, "/src/{filepath:*}", map[string]interface{}{"filepath": "some/file.png"}},
+		{"/cmd/test/3", false, "/cmd/{tool}/{sub}", map[string]any{"tool": "test", "sub": "3"}},
+		{"/src/", false, "/src/{filepath:*}", map[string]any{"filepath": ""}},
+		{"/src/some/file.png", false, "/src/{filepath:*}", map[string]any{"filepath": "some/file.png"}},
 		{"/search/", false, "/search/", nil},
-		{"/search/someth!ng+in+ünìcodé", false, "/search/{query}", map[string]interface{}{"query": "someth!ng+in+ünìcodé"}},
+		{"/search/someth!ng+in+ünìcodé", false, "/search/{query}", map[string]any{"query": "someth!ng+in+ünìcodé"}},
 		{"/search/someth!ng+in+ünìcodé/", true, "", nil},
-		{"/user_gopher", false, "/user_{name}", map[string]interface{}{"name": "gopher"}},
-		{"/user_gopher/about", false, "/user_{name}/about", map[string]interface{}{"name": "gopher"}},
-		{"/files/js/inc/framework.js", false, "/files/{dir}/{filepath:*}", map[string]interface{}{"dir": "js", "filepath": "inc/framework.js"}},
-		{"/info/gordon/public", false, "/info/{user}/public", map[string]interface{}{"user": "gordon"}},
-		{"/info/gordon/project/go", false, "/info/{user}/project/{project}", map[string]interface{}{"user": "gordon", "project": "go"}},
+		{"/user_gopher", false, "/user_{name}", map[string]any{"name": "gopher"}},
+		{"/user_gopher/about", false, "/user_{name}/about", map[string]any{"name": "gopher"}},
+		{"/files/js/inc/framework.js", false, "/files/{dir}/{filepath:*}", map[string]any{"dir": "js", "filepath": "inc/framework.js"}},
+		{"/info/gordon/public", false, "/info/{user}/public", map[string]any{"user": "gordon"}},
+		{"/info/gordon/project/go", false, "/info/{user}/project/{project}", map[string]any{"user": "gordon", "project": "go"}},
 		{"/info/gordon", true, "", nil},
 	})
 }
@@ -270,9 +252,9 @@ func TestTreeDuplicatePath(t *testing.T) {
 	checkRequests(t, tree, testRequests{
 		{"/", false, "/", nil},
 		{"/doc/", false, "/doc/", nil},
-		{"/src/some/file.png", false, "/src/{filepath:*}", map[string]interface{}{"filepath": "some/file.png"}},
-		{"/search/someth!ng+in+ünìcodé", false, "/search/{query}", map[string]interface{}{"query": "someth!ng+in+ünìcodé"}},
-		{"/user_gopher", false, "/user_{name}", map[string]interface{}{"name": "gopher"}},
+		{"/src/some/file.png", false, "/src/{filepath:*}", map[string]any{"filepath": "some/file.png"}},
+		{"/search/someth!ng+in+ünìcodé", false, "/search/{query}", map[string]any{"query": "someth!ng+in+ünìcodé"}},
+		{"/user_gopher", false, "/user_{name}", map[string]any{"name": "gopher"}},
 	})
 }
 
@@ -496,30 +478,30 @@ func TestTreeFindCaseInsensitivePath(t *testing.T) {
 		}
 	}
 
-	buf := bytebufferpool.Get()
+	buf := []byte{}
 
 	// Check out == in for all registered routes
 	// With fixTrailingSlash = true
 	for _, route := range routes {
-		found := tree.FindCaseInsensitivePath(route, true, buf)
+		found := tree.FindCaseInsensitivePath(route, true, &buf)
 		if !found {
 			t.Errorf("Route '%s' not found!", route)
-		} else if out := buf.String(); out != route {
+		} else if out := string(buf); out != route {
 			t.Errorf("Wrong result for route '%s': %s", route, out)
 		}
 
-		buf.Reset()
+		buf = buf[:0]
 	}
 	// With fixTrailingSlash = false
 	for _, route := range routes {
-		found := tree.FindCaseInsensitivePath(route, false, buf)
+		found := tree.FindCaseInsensitivePath(route, false, &buf)
 		if !found {
 			t.Errorf("Route '%s' not found!", route)
-		} else if out := buf.String(); out != route {
+		} else if out := string(buf); out != route {
 			t.Errorf("Wrong result for route '%s': %s", route, out)
 		}
 
-		buf.Reset()
+		buf = buf[:0]
 	}
 
 	tests := []struct {
@@ -593,29 +575,29 @@ func TestTreeFindCaseInsensitivePath(t *testing.T) {
 	}
 	// With fixTrailingSlash = true
 	for _, test := range tests {
-		found := tree.FindCaseInsensitivePath(test.in, true, buf)
-		if out := buf.String(); found != test.found || (found && (out != test.out)) {
+		found := tree.FindCaseInsensitivePath(test.in, true, &buf)
+		if out := string(buf); found != test.found || (found && (out != test.out)) {
 			t.Errorf("Wrong result for '%s': got %s, %t; want %s, %t",
 				test.in, string(out), found, test.out, test.found)
 		}
 
-		buf.Reset()
+		buf = buf[:0]
 	}
 	// With fixTrailingSlash = false
 	for _, test := range tests {
-		found := tree.FindCaseInsensitivePath(test.in, false, buf)
+		found := tree.FindCaseInsensitivePath(test.in, false, &buf)
 		if test.slash {
 			if found { // test needs a trailingSlash fix. It must not be found!
-				t.Errorf("Found without fixTrailingSlash: %s; got %s", test.in, buf.String())
+				t.Errorf("Found without fixTrailingSlash: %s; got %s", test.in, string(buf))
 			}
 		} else {
-			if out := buf.String(); found != test.found || (found && (out != test.out)) {
+			if out := string(buf); found != test.found || (found && (out != test.out)) {
 				t.Errorf("Wrong result for '%s': got %s, %t; want %s, %t",
 					test.in, out, found, test.out, test.found)
 			}
 		}
 
-		buf.Reset()
+		buf = buf[:0]
 	}
 }
 
@@ -641,7 +623,7 @@ func TestTreeInvalidNodeType(t *testing.T) {
 
 	// case-insensitive lookup
 	recv = catchPanic(func() {
-		tree.FindCaseInsensitivePath("/test", true, bytebufferpool.Get())
+		tree.FindCaseInsensitivePath("/test", true, &[]byte{})
 	})
 
 	if rs, ok := recv.(string); !ok || rs != panicMsg {

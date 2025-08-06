@@ -1,12 +1,9 @@
 package radix
 
 import (
+	"net/http"
 	"sort"
 	"strings"
-
-	gstrings "github.com/savsgio/gotils/strings"
-	"github.com/valyala/bytebufferpool"
-	"github.com/valyala/fasthttp"
 )
 
 func newNode(path string) *node {
@@ -96,7 +93,7 @@ func (n *node) findEndIndexAndValues(path string) (int, []string) {
 			continue
 		}
 
-		values[i] = gstrings.Copy(path[index[j-1]:index[j]])
+		values[i] = strings.Clone(path[index[j-1]:index[j]])
 
 		i++
 	}
@@ -104,7 +101,7 @@ func (n *node) findEndIndexAndValues(path string) (int, []string) {
 	return end, values
 }
 
-func (n *node) setHandler(handler fasthttp.RequestHandler, fullPath string) (*node, error) {
+func (n *node) setHandler(handler http.Handler, fullPath string) (*node, error) {
 	if n.handler != nil || n.tsr {
 		return n, newRadixError(errSetHandler, fullPath)
 	}
@@ -140,7 +137,7 @@ func (n *node) setHandler(handler fasthttp.RequestHandler, fullPath string) (*no
 	return n, nil
 }
 
-func (n *node) insert(path, fullPath string, handler fasthttp.RequestHandler) (*node, error) {
+func (n *node) insert(path, fullPath string, handler http.Handler) (*node, error) {
 	end := segmentEndIndex(path, true)
 	child := newNode(path)
 
@@ -225,7 +222,7 @@ func (n *node) insert(path, fullPath string, handler fasthttp.RequestHandler) (*
 }
 
 // add adds the handler to node for the given path
-func (n *node) add(path, fullPath string, handler fasthttp.RequestHandler) (*node, error) {
+func (n *node) add(path, fullPath string, handler http.Handler) (*node, error) {
 	if len(path) == 0 {
 		return n.setHandler(handler, fullPath)
 	}
@@ -279,7 +276,7 @@ func (n *node) add(path, fullPath string, handler fasthttp.RequestHandler) (*nod
 	return n.insert(path, fullPath, handler)
 }
 
-func (n *node) getFromChild(path string, ctx *fasthttp.RequestCtx) (fasthttp.RequestHandler, bool) {
+func (n *node) getFromChild(path string, req *http.Request) (http.Handler, bool) {
 	for _, child := range n.children {
 		switch child.nType {
 		case static:
@@ -295,7 +292,7 @@ func (n *node) getFromChild(path string, ctx *fasthttp.RequestCtx) (fasthttp.Req
 					continue
 				}
 
-				h, tsr := child.getFromChild(path[len(child.path):], ctx)
+				h, tsr := child.getFromChild(path[len(child.path):], req)
 				if h != nil || tsr {
 					return h, tsr
 				}
@@ -306,8 +303,8 @@ func (n *node) getFromChild(path string, ctx *fasthttp.RequestCtx) (fasthttp.Req
 				case child.handler != nil:
 					return child.handler, false
 				case child.wildcard != nil:
-					if ctx != nil {
-						ctx.SetUserValue(child.wildcard.paramKey, "")
+					if req != nil {
+						req.SetPathValue(child.wildcard.paramKey, "")
 					}
 
 					return child.wildcard.handler, false
@@ -318,7 +315,7 @@ func (n *node) getFromChild(path string, ctx *fasthttp.RequestCtx) (fasthttp.Req
 
 		case param:
 			end := segmentEndIndex(path, false)
-			values := []string{gstrings.Copy(path[:end])}
+			values := []string{strings.Clone(path[:end])}
 
 			if child.paramRegex != nil {
 				end, values = child.findEndIndexAndValues(path[:end])
@@ -328,13 +325,13 @@ func (n *node) getFromChild(path string, ctx *fasthttp.RequestCtx) (fasthttp.Req
 			}
 
 			if len(path) > end {
-				h, tsr := child.getFromChild(path[end:], ctx)
+				h, tsr := child.getFromChild(path[end:], req)
 				if tsr {
 					return nil, tsr
 				} else if h != nil {
-					if ctx != nil {
+					if req != nil {
 						for i, key := range child.paramKeys {
-							ctx.SetUserValue(key, values[i])
+							req.SetPathValue(key, values[i])
 						}
 					}
 
@@ -348,9 +345,9 @@ func (n *node) getFromChild(path string, ctx *fasthttp.RequestCtx) (fasthttp.Req
 				case child.handler == nil:
 					// try another child
 					continue
-				case ctx != nil:
+				case req != nil:
 					for i, key := range child.paramKeys {
-						ctx.SetUserValue(key, values[i])
+						req.SetPathValue(key, values[i])
 					}
 				}
 
@@ -363,8 +360,8 @@ func (n *node) getFromChild(path string, ctx *fasthttp.RequestCtx) (fasthttp.Req
 	}
 
 	if n.wildcard != nil {
-		if ctx != nil {
-			ctx.SetUserValue(n.wildcard.paramKey, gstrings.Copy(path))
+		if req != nil {
+			req.SetPathValue(n.wildcard.paramKey, strings.Clone(path))
 		}
 
 		return n.wildcard.handler, false
@@ -373,30 +370,30 @@ func (n *node) getFromChild(path string, ctx *fasthttp.RequestCtx) (fasthttp.Req
 	return nil, false
 }
 
-func (n *node) find(path string, buf *bytebufferpool.ByteBuffer) (bool, bool) {
+func (n *node) find(path string, buf *[]byte) (bool, bool) {
 	if len(path) > len(n.path) {
 		if !strings.EqualFold(path[:len(n.path)], n.path) {
 			return false, false
 		}
 
 		path = path[len(n.path):]
-		buf.WriteString(n.path)
+		*buf = append(*buf, n.path...)
 
 		found, tsr := n.findFromChild(path, buf)
 		if found {
 			return found, tsr
 		}
 
-		bufferRemoveString(buf, n.path)
+		*buf = (*buf)[:len(*buf)-len(n.path)]
 
 	} else if strings.EqualFold(path, n.path) {
-		buf.WriteString(n.path)
+		*buf = append(*buf, n.path...)
 
 		if n.tsr {
 			if n.path == "/" {
-				bufferRemoveString(buf, n.path)
+				*buf = (*buf)[:len(*buf)-len(n.path)]
 			} else {
-				buf.WriteByte('/')
+				*buf = append(*buf, '/')
 			}
 
 			return true, true
@@ -405,14 +402,14 @@ func (n *node) find(path string, buf *bytebufferpool.ByteBuffer) (bool, bool) {
 		if n.handler != nil {
 			return true, false
 		} else {
-			bufferRemoveString(buf, n.path)
+			*buf = (*buf)[:len(*buf)-len(n.path)]
 		}
 	}
 
 	return false, false
 }
 
-func (n *node) findFromChild(path string, buf *bytebufferpool.ByteBuffer) (bool, bool) {
+func (n *node) findFromChild(path string, buf *[]byte) (bool, bool) {
 	for _, child := range n.children {
 		switch child.nType {
 		case static:
@@ -431,7 +428,7 @@ func (n *node) findFromChild(path string, buf *bytebufferpool.ByteBuffer) (bool,
 				}
 			}
 
-			buf.WriteString(path[:end])
+			*buf = append(*buf, path[:end]...)
 
 			if len(path) > end {
 				found, tsr := child.findFromChild(path[end:], buf)
@@ -441,7 +438,7 @@ func (n *node) findFromChild(path string, buf *bytebufferpool.ByteBuffer) (bool,
 
 			} else if len(path) == end {
 				if child.tsr {
-					buf.WriteByte('/')
+					*buf = append(*buf, '/')
 
 					return true, true
 				}
@@ -451,7 +448,7 @@ func (n *node) findFromChild(path string, buf *bytebufferpool.ByteBuffer) (bool,
 				}
 			}
 
-			bufferRemoveString(buf, path[:end])
+			*buf = append(*buf, path[:end]...)
 
 		default:
 			panic("invalid node type")
@@ -459,7 +456,7 @@ func (n *node) findFromChild(path string, buf *bytebufferpool.ByteBuffer) (bool,
 	}
 
 	if n.wildcard != nil {
-		buf.WriteString(path)
+		*buf = append(*buf, path...)
 
 		return true, false
 	}
