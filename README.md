@@ -2,11 +2,9 @@
 
 Fork of [fasthttp/router](https://github.com/fasthttp/router/) adapted for `http.Handler`.
 
-Engineered as a simple 
+Engineered as a simple improvement upon standard net/http implementation of ServeMux, with main algorithm and ergonomics largely borrowed from fasthttp/router.
 
-A simple improvement upon standard net/http implementation of ServeMux, forked from fasthttp/router.
-
-As a fasthttp/router fork, this multiplexer introduces optional and regex path params.
+Thus, this multiplexer has optional and regex path params unlike the standard mux.
 
 Groups are also supported, but their ergonomics aren't traditional, instead you simply merge different handlers with Mux.Merge.
 

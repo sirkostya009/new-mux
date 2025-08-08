@@ -12,7 +12,7 @@ import (
 )
 
 func DefaultErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
-	http.Error(w, err.Error(), http.StatusInternalServerError)
+	http.Error(w, err.Error(), 500)
 }
 
 func DefaultOnMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
