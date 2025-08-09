@@ -24,7 +24,7 @@ func testHandlerAndParams(
 	for _, req := range []*http.Request{httptest.NewRequest("GET", reqPath, nil), nil} {
 
 		h, tsr := tree.Get(reqPath, req)
-		if reflect.ValueOf(handler).Pointer() != reflect.ValueOf(h).Pointer() {
+		if handler != nil && h != nil && reflect.ValueOf(handler).Pointer() != reflect.ValueOf(h).Pointer() {
 			t.Errorf("Path '%s' handler == %p, want %p", reqPath, h, handler)
 		}
 

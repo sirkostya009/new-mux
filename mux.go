@@ -111,7 +111,15 @@ func NewMux() *Mux {
 		OnMethodNotAllowed:    DefaultOnMethodNotAllowed,
 		OnNotFound:            DefaultOnNotFound,
 		OnPanic:               DefaultOnPanic,
+		GlobalOPTIONS:         func(w http.ResponseWriter, r *http.Request) {},
 	}
+}
+
+func (m *Mux) Group(prefix string) *Group {
+	if !strings.HasPrefix(prefix, "/") {
+		panic(`group prefix must begin with "/"`)
+	}
+	return &Group{prefix, m}
 }
 
 func (m *Mux) Pre(mw ...func(HandlerFunc) HandlerFunc) {
