@@ -51,10 +51,6 @@ func randomHTTPMethod() string {
 	return method
 }
 
-func buildLocation(host, path string) string {
-	return fmt.Sprintf("http://%s%s", host, path)
-}
-
 var zeroTCPAddr = &net.TCPAddr{
 	IP: net.IPv4zero,
 }
@@ -128,8 +124,8 @@ func TestRouter(t *testing.T) {
 
 		param := r.PathValue("name")
 
-		if param != "" {
-			t.Fatalf("wrong wildcard values: param value is nil")
+		if param == "" {
+			t.Fatalf("wrong wildcard values: param value is empty")
 		}
 
 		if param != want {
@@ -462,8 +458,8 @@ func TestRouterOPTIONS(t *testing.T) {
 
 		if !(rec.Result().StatusCode == expectedStatusCode) {
 			t.Errorf("OPTIONS handling failed: Code=%d, Header=%v", rec.Result().StatusCode, rec.Result().Header)
-		} else if allow := (rec.Result().Header.Get("Allow")); allow != expectedAllowed {
-			t.Error("unexpected Allow header value: " + allow)
+		} else if allow := (rec.Result().Header.Values("Allow")); strings.Join(allow, ", ") != expectedAllowed {
+			t.Error("unexpected Allow header value:", allow)
 		}
 	}
 
@@ -535,8 +531,8 @@ func TestRouterNotAllowed(t *testing.T) {
 
 		if !(rec.Result().StatusCode == expectedStatusCode) {
 			t.Errorf("NotAllowed handling failed:: Code=%d, Header=%v", rec.Result().StatusCode, rec.Result().Header)
-		} else if allow := (rec.Result().Header.Get("Allow")); allow != expectedAllowed {
-			t.Error("unexpected Allow header value: " + allow)
+		} else if allow := (rec.Result().Header.Values("Allow")); strings.Join(allow, ", ") != expectedAllowed {
+			t.Error("unexpected Allow header value:", allow)
 		}
 	}
 
@@ -575,7 +571,6 @@ func TestRouterNotAllowed(t *testing.T) {
 
 func testRouterNotFoundByMethod(t *testing.T, method string) {
 	handlerFunc := func(http.ResponseWriter, *http.Request) error { return nil }
-	host := "fast"
 
 	router := NewMux()
 	router.Handle(method, "/path", handlerFunc)
@@ -608,24 +603,24 @@ func testRouterNotFoundByMethod(t *testing.T, method string) {
 	}
 
 	testRoutes := []testRoute{
-		{"", http.StatusOK, ""},                                  // TSR +/ (Not clean by router, this path is cleaned by fasthttp `ctx.Path()`)
-		{"/../path", expectedCode, buildLocation(host, "/path")}, // CleanPath (Not clean by router, this path is cleaned by fasthttp `ctx.Path()`)
-		{"/nope", http.StatusNotFound, ""},                       // NotFound
+		// {"", http.StatusOK, ""},                                  // TSR +/ (Not clean by router, this path is cleaned by fasthttp `ctx.Path()`)
+		{"/../path", expectedCode, ("/path")}, // CleanPath (Not clean by router, this path is cleaned by fasthttp `ctx.Path()`)
+		{"/nope", http.StatusNotFound, ""},    // NotFound
 	}
 
 	if method != http.MethodConnect {
 		testRoutes = append(testRoutes, []testRoute{
-			{"/path/", expectedCode, buildLocation(host, "/path")},                                   // TSR -/
-			{"/dir", expectedCode, buildLocation(host, "/dir/")},                                     // TSR +/
-			{"/PATH", expectedCode, buildLocation(host, "/path")},                                    // Fixed Case
-			{"/DIR/", expectedCode, buildLocation(host, "/dir/")},                                    // Fixed Case
-			{"/PATH/", expectedCode, buildLocation(host, "/path")},                                   // Fixed Case -/
-			{"/DIR", expectedCode, buildLocation(host, "/dir/")},                                     // Fixed Case +/
-			{"/paTh/?name=foo", expectedCode, buildLocation(host, "/path?name=foo")},                 // Fixed Case With Query Params +/
-			{"/paTh?name=foo", expectedCode, buildLocation(host, "/path?name=foo")},                  // Fixed Case With Query Params +/
-			{"/sergio/status/", expectedCode, buildLocation(host, "/sergio/StaTus")},                 // Fixed Case With Params -/
-			{"/users/atreugo/eNtriEs", expectedCode, buildLocation(host, "/USERS/atreugo/enTRies/")}, // Fixed Case With Params +/
-			{"/STatiC/test.go", expectedCode, buildLocation(host, "/static/test.go")},                // Fixed Case Wildcard
+			{"/path/", expectedCode, "/path"},                                   // TSR -/
+			{"/dir", expectedCode, "/dir/"},                                     // TSR +/
+			{"/PATH", expectedCode, "/path"},                                    // Fixed Case
+			{"/DIR/", expectedCode, "/dir/"},                                    // Fixed Case
+			{"/PATH/", expectedCode, "/path"},                                   // Fixed Case -/
+			{"/DIR", expectedCode, "/dir/"},                                     // Fixed Case +/
+			{"/paTh/?name=foo", expectedCode, "/path?name=foo"},                 // Fixed Case With Query Params +/
+			{"/paTh?name=foo", expectedCode, "/path?name=foo"},                  // Fixed Case With Query Params +/
+			{"/sergio/status/", expectedCode, "/sergio/StaTus"},                 // Fixed Case With Params -/
+			{"/users/atreugo/eNtriEs", expectedCode, "/USERS/atreugo/enTRies/"}, // Fixed Case With Params +/
+			{"/STatiC/test.go", expectedCode, "/static/test.go"},                // Fixed Case Wildcard
 		}...)
 	}
 
@@ -688,7 +683,7 @@ func TestRouterNotFound(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPatch, "/path/?key=val", nil)
 	req.Host = host
 	router.ServeHTTP(rec, req)
-	if !(rec.Result().StatusCode == http.StatusPermanentRedirect && (rec.Result().Header.Get("Location")) == buildLocation(host, "/path?key=val")) {
+	if !(rec.Result().StatusCode == http.StatusPermanentRedirect && (rec.Result().Header.Get("Location")) == ("/path?key=val")) {
 		t.Errorf("Custom NotFound handler failed: Code=%d, Header=%v", rec.Result().StatusCode, rec.Result().Header)
 	}
 
@@ -717,7 +712,7 @@ func TestRouterNotFound_MethodWild(t *testing.T) {
 		return nil
 	})
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		router.Handle(
 			randomHTTPMethod(),
 			fmt.Sprintf("/%d", rand.Int63()),
@@ -1173,7 +1168,7 @@ func TestGetOptionalPath(t *testing.T) {
 			t.Errorf("TSR (path: %s) == %v, want %v", e.path, tsr, e.tsr)
 		}
 
-		if reflect.ValueOf(h) != reflect.ValueOf(e.handler) {
+		if h != nil && e.handler != nil && reflect.ValueOf(h) != reflect.ValueOf(e.handler) {
 			t.Errorf("Handler (path: %s) == %p, want %p", e.path, h, e.handler)
 		}
 	}

@@ -8,6 +8,12 @@ Thus, this multiplexer has optional and regex path params unlike the standard mu
 
 Groups are also supported, but their ergonomics aren't traditional, instead you simply merge different handlers with Mux.Merge.
 
+Inherits 0 allocation routing, except for redirects. This is a deliberate choice attempting to strip away any external deps from codebase.
+
+Additionally, RedirectResolvedPath (RedirectFixedPath in `fasthttp/router`) works differently by utilizing url.ResolveReference method.
+
+You _may_ want to disable redirects if you run into GC issues (but this router would probably be the least of your allocation problems anyway).
+
 # Usage
 
 ```go
@@ -21,15 +27,16 @@ mux.OnError = func(w http.ResponseWriter, r *http.Request, err error) {
 mux.Pre(func(next httx.HandlerFunc) httx.HandlerFunc {
 	return func (w http.ResponseWriter, r *http.Request) (err error) {
 		start := time.Now()
-		err = next(w, r)
-		finish := time.Now()
-		slog.Info("request", "duration", finish.Sub(start))
-		return
+		defer func() { // must defer stuff running after because panics
+			finish := time.Now()
+			slog.Info("request", "method", r.Method, "uri", r.RequestURI, "time-ms", finish.Sub(start).Milliseconds())
+		}()
+		return next(w, r)
 	}
 })
 
 // Method prefix is available since go ver 1.22
-mux.GET("/hello", func (w http.ResponseWriter, r *http.Request) error {
+mux.GET("/hello", func(w http.ResponseWriter, r *http.Request) error {
 	_, err := w.Write([]byte("world!"))
 	return err
 })
@@ -42,6 +49,11 @@ mux.GET(`/{id:\d+}`, func(w http.ResponseWriter, r *http.Request) error {
 
 _ = http.ListenAndServe(":8080", mux)
 ```
+
+## TODO:
+
+- [ ] Fix all tests
+- [ ] Add `FS` method
 
 ## License
 

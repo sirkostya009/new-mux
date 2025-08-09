@@ -1,8 +1,29 @@
 package httx
 
-import "net/http"
+import (
+	"log/slog"
+	"net/http"
+	"time"
+)
 
 var DefaultServeMux = NewMux()
+
+func init() {
+	DefaultServeMux.Pre(DefaultSlogMiddleware())
+}
+
+func DefaultSlogMiddleware() func(HandlerFunc) HandlerFunc {
+	return func(next HandlerFunc) HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) error {
+			start := time.Now()
+			defer func() {
+				finish := time.Now()
+				slog.Info("request", "method", r.Method, "uri", r.RequestURI, "time-ms", finish.Sub(start).Milliseconds())
+			}()
+			return next(w, r)
+		}
+	}
+}
 
 func Handle(method, path string, handler HandlerFunc) {
 	DefaultServeMux.Handle(method, path, handler)

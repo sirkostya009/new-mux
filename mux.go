@@ -12,6 +12,7 @@ import (
 )
 
 func DefaultErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
+	slog.Error("error", "method", r.Method, "uri", r.RequestURI, "error", err)
 	http.Error(w, err.Error(), 500)
 }
 
@@ -24,7 +25,7 @@ func DefaultOnNotFound(w http.ResponseWriter, r *http.Request) {
 }
 
 func DefaultOnPanic(w http.ResponseWriter, r *http.Request, a any) {
-	slog.Error("panic recovered", slog.Any("message", a))
+	slog.Error("panic", "method", r.Method, "uri", r.RequestURI, "panic", a)
 	w.WriteHeader(500)
 }
 
@@ -37,12 +38,17 @@ func (hf HandlerFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type Mux struct {
-	// Centralized error handling for the Mux. Cannot be nil.
+	// Centralized error handling for the Mux, invoked any time an error is
+	// returned by HandlerFunc.
+	//
+	// Cannot be nil.
 	OnError func(http.ResponseWriter, *http.Request, error)
 
 	// Configurable http.HandlerFunc which is called when a request
 	// cannot be routed.
+	//
 	// If nil, OnNotFound is called instead.
+	///
 	// The "Allow" header with allowed request methods is set before this handler
 	// is called.
 	OnMethodNotAllowed func(http.ResponseWriter, *http.Request)
@@ -54,6 +60,7 @@ type Mux struct {
 	// Function to handle panics recovered from http handlers.
 	// It should be used to generate a error page and return the http error code
 	// 500 (Internal Server Error).
+	//
 	// The handler can be used to keep your server from crashing because of
 	// unrecovered panics.
 	OnPanic func(http.ResponseWriter, *http.Request, any)
@@ -61,6 +68,7 @@ type Mux struct {
 	// An optional http.HandlerFunc that is called on automatic OPTIONS requests.
 	// The handler is only called if its not nil and no OPTIONS
 	// handler for the specific path was set.
+	//
 	// The "Allowed" header is set before calling the handler.
 	GlobalOPTIONS func(http.ResponseWriter, *http.Request)
 
@@ -73,21 +81,23 @@ type Mux struct {
 
 	// Enables automatic redirection if the current route can't be matched but a
 	// handler for the path with (without) the trailing slash exists.
+	//
 	// For example if /foo/ is requested but a route only exists for /foo, the
 	// client is redirected to /foo with http status code 301 for GET requests
 	// and 308 for all other request methods.
 	RedirectTrailingSlash bool
 
-	// If enabled, the router tries to fix the current request path, if no
-	// handle is registered for it.
-	// First superfluous path elements like ../ or // are removed.
-	// Afterwards the router does a case-insensitive lookup of the cleaned path.
-	// If a handle can be found for this route, the router makes a redirection
-	// to the corrected path with status code 301 for GET requests and 308 for
+	// If enabled, the router tries to resolve the current request path relative to /,
+	// if no handle is registered for it, using net/url.URL.ResolveReference method.
+	//
+	// If a handle can be found for the referenced route, a redirect is returned
+	// to corrected location with status code 301 for GET requests and 308 for
 	// all other request methods.
+	//
 	// For example /FOO and /..//Foo could be redirected to /foo.
+	//
 	// RedirectTrailingSlash is independent of this option.
-	RedirectFixedPath bool
+	RedirectResolvedPath bool
 }
 
 func NewMux() *Mux {
@@ -96,7 +106,7 @@ func NewMux() *Mux {
 		customMethodsIndex:    map[string]int{},
 		registeredPaths:       map[string][]string{},
 		RedirectTrailingSlash: true,
-		RedirectFixedPath:     true,
+		RedirectResolvedPath:  true,
 		OnError:               DefaultErrorHandler,
 		OnMethodNotAllowed:    DefaultOnMethodNotAllowed,
 		OnNotFound:            DefaultOnNotFound,
@@ -180,7 +190,11 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if methodIndex := m.methodIndexOf(r.Method); methodIndex > -1 {
 		if tree := m.trees[methodIndex]; tree != nil {
 			if handler, tsr := tree.Get(path, r); handler != nil {
-				handler.ServeHTTP(w, r)
+				handler := handler.(HandlerFunc) // ugly cast but i cant cyclically reference httx.HandleFunc in radix package
+				err := handler(w, r)
+				if err != nil {
+					m.OnError(w, r, err)
+				}
 				return
 			} else if r.Method != http.MethodConnect && path != "/" {
 				if ok := m.tryRedirect(w, r, tree, tsr, r.Method, path); ok {
@@ -193,7 +207,11 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Try to search in the wild method tree
 	if tree := m.trees[m.methodIndexOf(MethodWild)]; tree != nil {
 		if handler, tsr := tree.Get(path, r); handler != nil {
-			handler.ServeHTTP(w, r)
+			handler := handler.(HandlerFunc)
+			err := handler(w, r)
+			if err != nil {
+				m.OnError(w, r, err)
+			}
 			return
 		} else if r.Method != http.MethodConnect && path != "/" {
 			if ok := m.tryRedirect(w, r, tree, tsr, r.Method, path); ok {
@@ -219,6 +237,8 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.OnNotFound(w, r)
 }
 
+var base, _ = url.Parse("/")
+
 func (m *Mux) tryRedirect(w http.ResponseWriter, r *http.Request, tree *radix.Tree, tsr bool, method, path string) bool {
 	// Moved Permanently, request with GET method
 	code := http.StatusMovedPermanently
@@ -242,29 +262,30 @@ func (m *Mux) tryRedirect(w http.ResponseWriter, r *http.Request, tree *radix.Tr
 			uri = append(uri, r.URL.RawQuery...)
 		}
 
-		w.WriteHeader(code)
 		w.Header()["Location"] = []string{unsafe.String(&uri[0], len(uri))}
+		w.WriteHeader(code)
 
 		return true
 	}
 
 	// Try to fix the request path
-	if m.RedirectFixedPath {
+	if m.RedirectResolvedPath {
 		uri := make([]byte, 0, len(r.RequestURI)+1)
+		resolved := base.ResolveReference(r.URL)
 		found := tree.FindCaseInsensitivePath(
-			strings.TrimSuffix(r.URL.Path, "."),
+			strings.TrimSuffix(resolved.Path, "."),
 			m.RedirectTrailingSlash,
 			&uri,
 		)
 
 		if found {
-			if len(r.URL.RawQuery) > 0 {
+			if len(resolved.RawQuery) > 0 {
 				uri = append(uri, '?')
 				uri = append(uri, r.URL.RawQuery...)
 			}
 
-			w.WriteHeader(code)
 			w.Header()["Location"] = []string{unsafe.String(&uri[0], len(uri))}
+			w.WriteHeader(code)
 
 			return true
 		}
@@ -276,10 +297,6 @@ func (m *Mux) tryRedirect(w http.ResponseWriter, r *http.Request, tree *radix.Tr
 func (m *Mux) Merge(prefix string, handler http.Handler) {
 	switch h := handler.(type) {
 	case *Mux:
-		m2 := &Mux{}
-		*m2 = *m
-		m2.mw = append(m2.mw, h.mw...)
-		m2.OnError = h.OnError
 		for method, paths := range h.registeredPaths {
 			for _, path := range paths {
 				methodIndex := h.methodIndexOf(method)
@@ -290,9 +307,9 @@ func (m *Mux) Merge(prefix string, handler http.Handler) {
 					}
 					switch h := h.(type) {
 					case HandlerFunc:
-						m2.Handle(method, fullPath, h)
+						m.Handle(method, fullPath, h)
 					default:
-						m2.Merge(fullPath, h)
+						m.Merge(fullPath, h)
 					}
 				}
 			}
@@ -302,6 +319,7 @@ func (m *Mux) Merge(prefix string, handler http.Handler) {
 			panic("non-Mux merges must end with *")
 		}
 		noStar := prefix[:len(prefix)-1]
+		notFound := m.OnNotFound
 		m.Handle(MethodWild, prefix, func(w http.ResponseWriter, r *http.Request) error {
 			// the exact copy of code from http.StripPrefix
 			p := strings.TrimPrefix(r.URL.Path, noStar)
@@ -315,7 +333,7 @@ func (m *Mux) Merge(prefix string, handler http.Handler) {
 				r2.URL.RawPath = rp
 				h.ServeHTTP(w, r2)
 			} else {
-				m.OnNotFound(w, r)
+				notFound(w, r)
 			}
 			return nil
 		})
@@ -357,22 +375,14 @@ func (m *Mux) Handle(method, path string, handler HandlerFunc) {
 		handler = mw(handler)
 	}
 
-	onerr := m.OnError
-	stdHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := handler(w, r)
-		if err != nil {
-			onerr(w, r, err)
-		}
-	})
-
 	optionalPaths := getOptionalPaths(path)
 
 	// if no optional paths, adds the original
 	if len(optionalPaths) == 0 {
-		tree.Add(path, stdHandler)
+		tree.Add(path, handler)
 	} else {
 		for _, p := range optionalPaths {
-			tree.Add(p, stdHandler)
+			tree.Add(p, handler)
 		}
 	}
 }
